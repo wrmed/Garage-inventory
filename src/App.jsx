@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Search, Plus, X, ArrowLeft, Trash2, Pencil, Package, MapPin, Tag } from "lucide-react";
 
 const SUPABASE_URL = "https://tsnygejdfqjeyzkcmicd.supabase.co";
@@ -37,6 +37,10 @@ const db = {
   updateItem: (id, patch) =>
     dbFetch(`/items?id=eq.${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteItem: (id) => dbFetch(`/items?id=eq.${id}`, { method: "DELETE" }),
+  updateItemsBulk: (ids, patch) =>
+    ids.length
+      ? dbFetch(`/items?id=in.(${ids.join(",")})`, { method: "PATCH", body: JSON.stringify(patch) })
+      : Promise.resolve(null),
 };
 
 const FONT_IMPORT = `
@@ -67,7 +71,12 @@ export default function GarageInventory() {
       try {
         const [binsData, itemsData] = await Promise.all([db.getBins(), db.getItems()]);
         setBins(
-          (binsData || []).map((b) => ({ id: b.id, name: b.name, location: b.location || "" }))
+          (binsData || []).map((b) => ({
+            id: b.id,
+            name: b.name,
+            location: b.location || "",
+            lastAudited: b.last_audited || null,
+          }))
         );
         setItems(
           (itemsData || []).map((i) => ({
@@ -76,6 +85,7 @@ export default function GarageInventory() {
             name: i.name,
             qty: i.qty || "",
             notes: i.notes || "",
+            status: i.status || "ok",
           }))
         );
       } catch (e) {
@@ -176,11 +186,19 @@ export default function GarageInventory() {
           name: data.name,
           qty: data.qty,
           notes: data.notes,
+          status: "ok",
         };
         await db.insertItem(newItem);
         setItems((prev) => [
           ...prev,
-          { id: newItem.id, binId: activeBinId, name: data.name, qty: data.qty, notes: data.notes },
+          {
+            id: newItem.id,
+            binId: activeBinId,
+            name: data.name,
+            qty: data.qty,
+            notes: data.notes,
+            status: "ok",
+          },
         ]);
       }
       setShowItemModal(false);
@@ -196,6 +214,31 @@ export default function GarageInventory() {
       setItems((prev) => prev.filter((i) => i.id !== id));
     } catch (e) {
       alert("Couldn't delete item: " + e.message);
+    }
+  }
+
+  // Audit: confirmedIds are items the user checked off during this session.
+  // Anything in the bin not in that set gets marked missing; confirmed items
+  // get marked ok. The bin's last_audited timestamp is stamped to now.
+  async function finishAudit(binId, confirmedIds) {
+    const binItemIds = items.filter((i) => i.binId === binId).map((i) => i.id);
+    const missingIds = binItemIds.filter((id) => !confirmedIds.includes(id));
+    const now = new Date().toISOString();
+    try {
+      await Promise.all([
+        db.updateItemsBulk(confirmedIds, { status: "ok" }),
+        db.updateItemsBulk(missingIds, { status: "missing" }),
+        db.updateBin(binId, { last_audited: now }),
+      ]);
+      setItems((prev) =>
+        prev.map((i) => {
+          if (i.binId !== binId) return i;
+          return { ...i, status: confirmedIds.includes(i.id) ? "ok" : "missing" };
+        })
+      );
+      setBins((prev) => prev.map((b) => (b.id === binId ? { ...b, lastAudited: now } : b)));
+    } catch (e) {
+      alert("Couldn't save audit: " + e.message);
     }
   }
 
@@ -258,6 +301,7 @@ export default function GarageInventory() {
             setShowItemModal(true);
           }}
           onDeleteItem={deleteItem}
+          onFinishAudit={(confirmedIds) => finishAudit(activeBin.id, confirmedIds)}
         />
       )}
 
@@ -335,9 +379,19 @@ function Home({ bins, items, query, setQuery, onOpenBin, onNewBin }) {
       )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        {bins.map((bin) => (
-          <BinTag key={bin.id} bin={bin} itemCount={items.filter((i) => i.binId === bin.id).length} onClick={() => onOpenBin(bin.id)} />
-        ))}
+        {bins.map((bin) => {
+          const binItems = items.filter((i) => i.binId === bin.id);
+          const missingCount = binItems.filter((i) => i.status === "missing").length;
+          return (
+            <BinTag
+              key={bin.id}
+              bin={bin}
+              itemCount={binItems.length}
+              missingCount={missingCount}
+              onClick={() => onOpenBin(bin.id)}
+            />
+          );
+        })}
       </div>
 
       <button
@@ -352,7 +406,18 @@ function Home({ bins, items, query, setQuery, onOpenBin, onNewBin }) {
   );
 }
 
-function BinTag({ bin, itemCount, onClick }) {
+function formatAuditDate(iso) {
+  if (!iso) return "Never audited";
+  const d = new Date(iso);
+  const now = new Date();
+  const diffDays = Math.floor((now - d) / (1000 * 60 * 60 * 24));
+  if (diffDays === 0) return "Audited today";
+  if (diffDays === 1) return "Audited yesterday";
+  if (diffDays < 30) return `Audited ${diffDays}d ago`;
+  return `Audited ${d.toLocaleDateString()}`;
+}
+
+function BinTag({ bin, itemCount, missingCount, onClick }) {
   return (
     <button
       onClick={onClick}
@@ -395,15 +460,78 @@ function BinTag({ bin, itemCount, onClick }) {
           {bin.location}
         </div>
       )}
-      <div className="mt-3 text-[10px] tracking-widest" style={{ color: "#A39C8A" }}>
-        TAG #{bin.id.toUpperCase()}
+      <div className="flex items-center justify-between mt-3">
+        <span className="text-[10px] tracking-widest" style={{ color: "#A39C8A" }}>
+          TAG #{bin.id.toUpperCase()}
+        </span>
+        {missingCount > 0 ? (
+          <span className="text-[10px]" style={{ color: "#B0432B" }}>
+            {missingCount} missing
+          </span>
+        ) : (
+          <span className="text-[10px]" style={{ color: "#8A8580" }}>
+            {formatAuditDate(bin.lastAudited)}
+          </span>
+        )}
       </div>
     </button>
   );
 }
 
-function BinDetail({ bin, binItems, onBack, onEditBin, onDeleteBin, onNewItem, onEditItem, onDeleteItem }) {
+function BinDetail({
+  bin,
+  binItems,
+  onBack,
+  onEditBin,
+  onDeleteBin,
+  onNewItem,
+  onEditItem,
+  onDeleteItem,
+  onFinishAudit,
+}) {
   const [copied, setCopied] = useState(false);
+  const [auditing, setAuditing] = useState(false);
+  const [confirmed, setConfirmed] = useState(new Set());
+
+  function startAudit() {
+    setConfirmed(new Set());
+    setAuditing(true);
+  }
+
+  function toggleConfirmed(id) {
+    setConfirmed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function handleFinish() {
+    onFinishAudit(Array.from(confirmed));
+    setAuditing(false);
+  }
+
+  // If a new item appears while auditing (user added one mid-audit), treat
+  // it as automatically confirmed since adding it is itself a confirmation.
+  const prevItemIdsRef = useRef(new Set(binItems.map((i) => i.id)));
+  useEffect(() => {
+    if (auditing) {
+      const currentIds = new Set(binItems.map((i) => i.id));
+      const newIds = [...currentIds].filter((id) => !prevItemIdsRef.current.has(id));
+      if (newIds.length) {
+        setConfirmed((prev) => {
+          const next = new Set(prev);
+          newIds.forEach((id) => next.add(id));
+          return next;
+        });
+      }
+    }
+    prevItemIdsRef.current = new Set(binItems.map((i) => i.id));
+  }, [binItems, auditing]);
+
+  const missingCount = binItems.filter((i) => i.status === "missing").length;
+
   return (
     <div className="max-w-3xl mx-auto px-5 pt-8 pb-24">
       <button
@@ -462,6 +590,9 @@ function BinDetail({ bin, binItems, onBack, onEditBin, onDeleteBin, onNewItem, o
                 {copied ? "Copied!" : "Copy tag URL"}
               </button>
             </div>
+            <div className="text-[10px] mt-1" style={{ color: "#6B6862" }}>
+              {formatAuditDate(bin.lastAudited)}
+            </div>
           </div>
           <div className="flex gap-2">
             <button onClick={onEditBin} aria-label="Edit bin" style={{ color: "#6B6862" }}>
@@ -474,18 +605,40 @@ function BinDetail({ bin, binItems, onBack, onEditBin, onDeleteBin, onNewItem, o
         </div>
       </div>
 
+      {missingCount > 0 && !auditing && (
+        <div
+          className="rounded-md px-4 py-2.5 mb-4 text-xs"
+          style={{ background: "rgba(176,67,43,0.15)", border: "1px solid #B0432B", color: "#E8A491" }}
+        >
+          {missingCount} item{missingCount === 1 ? "" : "s"} flagged missing since last audit
+        </div>
+      )}
+
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-xs tracking-[0.25em]" style={{ color: "#E8590C", fontFamily: "'Oswald', sans-serif" }}>
-          CONTENTS
+          {auditing ? "AUDITING" : "CONTENTS"}
         </h3>
-        <button
-          onClick={onNewItem}
-          className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded"
-          style={{ background: "#222226", border: "1px solid #3A3A3F", color: "#EDE9E1" }}
-        >
-          <Plus size={14} />
-          Add item
-        </button>
+        <div className="flex gap-2">
+          {!auditing && binItems.length > 0 && (
+            <button
+              onClick={startAudit}
+              className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded"
+              style={{ background: "#E8590C", color: "#17171A" }}
+            >
+              Start audit
+            </button>
+          )}
+          {!auditing && (
+            <button
+              onClick={onNewItem}
+              className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded"
+              style={{ background: "#222226", border: "1px solid #3A3A3F", color: "#EDE9E1" }}
+            >
+              <Plus size={14} />
+              Add item
+            </button>
+          )}
+        </div>
       </div>
 
       {binItems.length === 0 && (
@@ -498,40 +651,97 @@ function BinDetail({ bin, binItems, onBack, onEditBin, onDeleteBin, onNewItem, o
       )}
 
       <div className="flex flex-col gap-2">
-        {binItems.map((item) => (
-          <div
-            key={item.id}
-            className="flex items-start justify-between gap-3 rounded-md px-4 py-3"
-            style={{ background: "#222226", border: "1px solid #2D2D32" }}
-          >
-            <div className="flex-1">
-              <div className="flex items-baseline gap-2">
-                <span className="text-sm" style={{ color: "#EDE9E1" }}>
-                  {item.name}
-                </span>
-                {item.qty && (
-                  <span className="text-xs" style={{ color: "#E8590C" }}>
-                    &times;{item.qty}
+        {binItems.map((item) => {
+          const isConfirmed = confirmed.has(item.id);
+          const isMissing = !auditing && item.status === "missing";
+          return (
+            <div
+              key={item.id}
+              className="flex items-start justify-between gap-3 rounded-md px-4 py-3"
+              style={{
+                background: "#222226",
+                border: isMissing ? "1px solid #B0432B" : "1px solid #2D2D32",
+              }}
+            >
+              {auditing && (
+                <button
+                  onClick={() => toggleConfirmed(item.id)}
+                  aria-label={isConfirmed ? "Unconfirm item" : "Confirm item present"}
+                  className="shrink-0 mt-0.5 w-5 h-5 rounded flex items-center justify-center"
+                  style={{
+                    background: isConfirmed ? "#E8590C" : "transparent",
+                    border: `1px solid ${isConfirmed ? "#E8590C" : "#5A564F"}`,
+                  }}
+                >
+                  {isConfirmed && <span style={{ color: "#17171A", fontSize: "12px" }}>✓</span>}
+                </button>
+              )}
+              <div className="flex-1">
+                <div className="flex items-baseline gap-2">
+                  <span
+                    className="text-sm"
+                    style={{ color: isMissing ? "#E8A491" : "#EDE9E1" }}
+                  >
+                    {item.name}
                   </span>
+                  {item.qty && (
+                    <span className="text-xs" style={{ color: "#E8590C" }}>
+                      &times;{item.qty}
+                    </span>
+                  )}
+                  {isMissing && (
+                    <span className="text-[10px] px-1 rounded" style={{ background: "#B0432B", color: "#F2EBDB" }}>
+                      MISSING
+                    </span>
+                  )}
+                </div>
+                {item.notes && (
+                  <div className="text-xs mt-1" style={{ color: "#807C73" }}>
+                    {item.notes}
+                  </div>
                 )}
               </div>
-              {item.notes && (
-                <div className="text-xs mt-1" style={{ color: "#807C73" }}>
-                  {item.notes}
+              {!auditing && (
+                <div className="flex gap-2 shrink-0 pt-0.5">
+                  <button onClick={() => onEditItem(item)} aria-label="Edit item" style={{ color: "#6B6862" }}>
+                    <Pencil size={14} />
+                  </button>
+                  <button onClick={() => onDeleteItem(item.id)} aria-label="Delete item" style={{ color: "#B0432B" }}>
+                    <Trash2 size={14} />
+                  </button>
                 </div>
               )}
             </div>
-            <div className="flex gap-2 shrink-0 pt-0.5">
-              <button onClick={() => onEditItem(item)} aria-label="Edit item" style={{ color: "#6B6862" }}>
-                <Pencil size={14} />
-              </button>
-              <button onClick={() => onDeleteItem(item.id)} aria-label="Delete item" style={{ color: "#B0432B" }}>
-                <Trash2 size={14} />
-              </button>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
+
+      {auditing && (
+        <div className="mt-4 flex gap-2">
+          <button
+            onClick={onNewItem}
+            className="flex-1 flex items-center justify-center gap-1 text-xs px-2.5 py-2.5 rounded"
+            style={{ background: "#222226", border: "1px solid #3A3A3F", color: "#EDE9E1" }}
+          >
+            <Plus size={14} />
+            Add item
+          </button>
+          <button
+            onClick={() => setAuditing(false)}
+            className="flex-1 text-xs px-2.5 py-2.5 rounded"
+            style={{ background: "#222226", border: "1px solid #3A3A3F", color: "#EDE9E1" }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleFinish}
+            className="flex-1 text-xs px-2.5 py-2.5 rounded font-medium"
+            style={{ background: "#E8590C", color: "#17171A" }}
+          >
+            Finish audit ({confirmed.size}/{binItems.length})
+          </button>
+        </div>
+      )}
     </div>
   );
 }
