@@ -98,6 +98,21 @@ export default function GarageInventory() {
     } catch (e) {}
   }, [loaded, bins]);
 
+  // Keep the address bar in sync with the current view, so the URL can be
+  // copied straight from the browser and written to an NFC tag.
+  useEffect(() => {
+    if (!loaded) return;
+    try {
+      const url = new URL(window.location.href);
+      if (view === "bin" && activeBinId) {
+        url.searchParams.set("bin", activeBinId);
+      } else {
+        url.searchParams.delete("bin");
+      }
+      window.history.replaceState(null, "", url.toString());
+    } catch (e) {}
+  }, [loaded, view, activeBinId]);
+
   // Note: persistence now happens directly in each save/delete function below,
   // since each one writes straight to Supabase.
 
@@ -388,6 +403,7 @@ function BinTag({ bin, itemCount, onClick }) {
 }
 
 function BinDetail({ bin, binItems, onBack, onEditBin, onDeleteBin, onNewItem, onEditItem, onDeleteItem }) {
+  const [copied, setCopied] = useState(false);
   return (
     <div className="max-w-3xl mx-auto px-5 pt-8 pb-24">
       <button
@@ -428,8 +444,23 @@ function BinDetail({ bin, binItems, onBack, onEditBin, onDeleteBin, onNewItem, o
                 {bin.location}
               </div>
             )}
-            <div className="mt-2 text-[10px] tracking-widest" style={{ color: "#A39C8A" }}>
-              TAG #{bin.id.toUpperCase()}
+            <div className="flex items-center gap-2 mt-2">
+              <span className="text-[10px] tracking-widest" style={{ color: "#A39C8A" }}>
+                TAG #{bin.id.toUpperCase()}
+              </span>
+              <button
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(window.location.href);
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 1500);
+                  } catch (e) {}
+                }}
+                className="text-[10px] px-1.5 py-0.5 rounded"
+                style={{ background: "#E8590C", color: "#F2EBDB" }}
+              >
+                {copied ? "Copied!" : "Copy tag URL"}
+              </button>
             </div>
           </div>
           <div className="flex gap-2">
