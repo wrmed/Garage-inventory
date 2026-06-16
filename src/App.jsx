@@ -143,6 +143,17 @@ export default function GarageInventory() {
     );
   }, [bins, items, query]);
 
+  // Direct item matches, paired with their bin, so the search can answer
+  // "where is X" explicitly rather than just surfacing the whole bin card.
+  const matchedItems = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    return items
+      .filter((i) => i.name.toLowerCase().includes(q))
+      .map((i) => ({ item: i, bin: bins.find((b) => b.id === i.binId) }))
+      .filter((m) => m.bin);
+  }, [items, bins, query]);
+
   async function saveBin(data) {
     try {
       if (data.id) {
@@ -266,6 +277,7 @@ export default function GarageInventory() {
         <Home
           bins={filteredBins}
           items={items}
+          matchedItems={matchedItems}
           query={query}
           setQuery={setQuery}
           onOpenBin={(id) => {
@@ -330,7 +342,8 @@ export default function GarageInventory() {
   );
 }
 
-function Home({ bins, items, query, setQuery, onOpenBin, onNewBin }) {
+function Home({ bins, items, matchedItems, query, setQuery, onOpenBin, onNewBin }) {
+  const hasQuery = query.trim().length > 0;
   return (
     <div className="max-w-3xl mx-auto px-5 pt-10 pb-24">
       <div className="mb-8">
@@ -367,6 +380,59 @@ function Home({ bins, items, query, setQuery, onOpenBin, onNewBin }) {
         />
       </div>
 
+      {hasQuery && (
+        <div className="mb-7">
+          <h3
+            className="text-xs tracking-[0.25em] mb-3"
+            style={{ color: "#E8590C", fontFamily: "'Oswald', sans-serif" }}
+          >
+            FOUND IN
+          </h3>
+          {matchedItems.length === 0 ? (
+            <div className="text-sm" style={{ color: "#8A8580" }}>
+              No matching items.
+            </div>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {matchedItems.map(({ item, bin }) => (
+                <button
+                  key={item.id}
+                  onClick={() => onOpenBin(bin.id)}
+                  className="w-full text-left flex items-center justify-between gap-3 rounded-md px-4 py-3"
+                  style={{ background: "#222226", border: "1px solid #2D2D32" }}
+                >
+                  <div>
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-sm" style={{ color: "#EDE9E1" }}>
+                        {item.name}
+                      </span>
+                      {item.qty && (
+                        <span className="text-xs" style={{ color: "#E8590C" }}>
+                          &times;{item.qty}
+                        </span>
+                      )}
+                      {item.status === "missing" && (
+                        <span
+                          className="text-[10px] px-1 rounded"
+                          style={{ background: "#B0432B", color: "#F2EBDB" }}
+                        >
+                          MISSING
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs mt-1" style={{ color: "#A39C8A" }}>
+                      in {bin.name}
+                      {bin.location ? ` · ${bin.location}` : ""}
+                    </div>
+                  </div>
+                  <Tag size={14} style={{ color: "#6B6862" }} className="shrink-0" />
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {bins.length === 0 && (
         <div
           className="rounded-md border border-dashed py-14 text-center"
@@ -376,6 +442,15 @@ function Home({ bins, items, query, setQuery, onOpenBin, onNewBin }) {
           <p className="text-sm">No bins yet.</p>
           <p className="text-xs mt-1">Add one and stick an NFC tag to it.</p>
         </div>
+      )}
+
+      {bins.length > 0 && (
+        <h3
+          className="text-xs tracking-[0.25em] mb-3"
+          style={{ color: "#8A8580", fontFamily: "'Oswald', sans-serif" }}
+        >
+          {hasQuery ? "MATCHING BINS" : "ALL BINS"}
+        </h3>
       )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
